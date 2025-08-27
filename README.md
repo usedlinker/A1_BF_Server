@@ -1,4 +1,4 @@
-# Bepu (BestFriend) AI Server — A1-3
+# Bepu (BestFriend) AI Server — A1-3 (Fixed)
 
 FastAPI server for Bepu AI: multilingual chat + TTS. Works on Render.com.
 
@@ -21,8 +21,8 @@ curl -i http://127.0.0.1:8000/health
 - Env (optional): `ALLOWED_ORIGINS`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `BF_TEMPERATURE`, `BF_APP_VERSION`
 
 ## Notes
-- Without `OPENAI_API_KEY`, `/chat` runs in **fallback** mode.
-- `/tts` uses **gTTS** (requires outbound internet).
+- Without `OPENAI_API_KEY`, `/chat` runs in fallback mode.
+- `/tts` uses **gTTS 2.5.4** (latest supported).
 - CORS is controlled via `ALLOWED_ORIGINS` (default `*`).
 
 ## License
