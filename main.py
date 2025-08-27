@@ -29,7 +29,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 BF_TEMPERATURE = float(os.getenv("BF_TEMPERATURE", "0.6"))
 
-# Create FastAPI app (Uvicorn loads main:app)
+# FastAPI app
 app = FastAPI(title="Bepu (BestFriend) AI Server", version=APP_VERSION)
 
 # CORS
@@ -96,10 +96,10 @@ def translate_hint(lang: str) -> str:
 
 def fallback_reply(msg: str, lang: str) -> str:
     if lang == "ko":
-        return f"안녕! 베프 AI야. "{msg}" 이렇게 이해했어. 지금은 간단 모드로 답해."
+        return f"안녕! 베프 AI야. \"{msg}\" 이렇게 이해했어. 지금은 간단 모드로 답해."
     if lang == "vi":
-        return f"Xin chào! Mình là Bepu AI. Mình hiểu: "{msg}". Hiện đang ở chế độ đơn giản."
-    return f"Hi! I'm Bepu AI. I understood: "{msg}". Running in simple mode."
+        return f"Xin chào! Mình là Bepu AI. Mình hiểu: \"{msg}\". Hiện đang ở chế độ đơn giản."
+    return f"Hi! I'm Bepu AI. I understood: \"{msg}\". Running in simple mode."
 
 
 @app.get("/", response_class=PlainTextResponse)
@@ -119,12 +119,11 @@ def chat(inp: ChatIn):
     t0 = time.time()
     lang = inp.target_lang or detect_lang(inp.message)
 
-    # Try OpenAI first
     if _openai_client is not None:
         try:
             msgs = [
                 {"role": "system", "content": "You are Bepu (BestFriend), a kind and concise assistant."},
-                {"role": "user", "content": f"User language: {lang}{translate_hint(lang)}\nUser: {inp.message}\nAssistant:"},
+                {"role": "user", "content": f"User language: {lang}{translate_hint(lang)}\\nUser: {inp.message}\\nAssistant:"},
             ]
             resp = _openai_client.chat.completions.create(
                 model=OPENAI_MODEL,
