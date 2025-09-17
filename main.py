@@ -1,171 +1,108 @@
+# main.py
 import os
-import io
-import time
-from typing import Optional, List
-
-from fastapi import FastAPI, HTTPException
+import uvicorn
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, PlainTextResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Optional
+import time
 
-try:
-    from langdetect import detect, DetectorFactory
-    DetectorFactory.seed = 0
-    _LANGDETECT = True
-except Exception:
-    _LANGDETECT = False
+# ---- OpenAI (>=1.x) SDK ----
+from openai import OpenAI
 
-try:
-    from openai import OpenAI
-    _OPENAI_IMPORTED = True
-except Exception:
-    _OPENAI_IMPORTED = False
-
-from gtts import gTTS
-
-APP_VERSION = os.getenv("BF_APP_VERSION", "A1-3-2025-08-27")
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-BF_TEMPERATURE = float(os.getenv("BF_TEMPERATURE", "0.6"))
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-# FastAPI app
-app = FastAPI(title="Bepu (BestFriend) AI Server", version=APP_VERSION)
+app = FastAPI(title="A1-BF-Server", version="1.0.0")
 
-# CORS
-origins: List[str]
-if ALLOWED_ORIGINS.strip() == "*":
-    origins = ["*"]
-else:
-    origins = [o.strip() for o in ALLOWED_ORIGINS.split(",") if o.strip()]
-
+# CORS (앱/웹에서 직접 칠 수 있도록)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],  # 필요시 도메인 제한
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-_openai_client = None
-if _OPENAI_IMPORTED and OPENAI_API_KEY:
-    try:
-        _openai_client = OpenAI(api_key=OPENAI_API_KEY)
-    except Exception:
-        _openai_client = None
-
-
-class HistoryItem(BaseModel):
-    role: str
-    content: str
-
 class ChatIn(BaseModel):
-    user_id: str = "guest"
-    message: str
-    history: Optional[List[HistoryItem]] = None
-    target_lang: Optional[str] = None
+    message: str = Field(..., description="사용자 발화")
+    voice: Optional[str] = "ko-KR"
+    lang: Optional[str] = "ko"
+    persona: Optional[str] = "30세 친구. 운전 중 대화. 캐주얼하고 다정한 톤."
+    style: Optional[str] = "짧고 자연스럽게, 1~2문장, 말끝에 가벼운 되물음"
+    temperature: Optional[float] = 0.2
+    max_sentences: Optional[int] = 2
 
 class ChatOut(BaseModel):
     reply: str
-    detected_lang: str
-    model: str
-    mode: str
-    latency_ms: int
-    version: str = APP_VERSION
+    audio_url: Optional[str] = ""
 
-class TTSIn(BaseModel):
-    text: str
-    lang: Optional[str] = None
+SYSTEM_TEMPLATE = """너는 운전 중 대화하는 한국어 베스트 프렌드야.
+- 항상 한국어로 간단하고 자연스럽게 1~2문장으로 답해.
+- 운전 집중을 고려해 장문·리스트·숫자 나열은 피하고, 말끝에 가벼운 되물음을 덧붙여 대화를 잇는다.
+- 위험·선정·차별적 내용은 회피하고, 건전한 주제로 부드럽게 전환한다.
+페르소나: {persona}
+스타일: {style}
+"""
 
-
-def detect_lang(text: str) -> str:
-    if _LANGDETECT:
-        try:
-            code = detect(text)
-            if code.startswith("ko"):
-                return "ko"
-            if code.startswith("vi"):
-                return "vi"
-            return "en"
-        except Exception:
-            return "en"
-    return "en"
-
-def translate_hint(lang: str) -> str:
-    return {"ko": " (한국어)", "vi": " (Tiếng Việt)", "en": " (English)"}.get(lang, " (English)")
-
-def fallback_reply(msg: str, lang: str) -> str:
-    if lang == "ko":
-        return f"안녕! 베프 AI야. \"{msg}\" 이렇게 이해했어. 지금은 간단 모드로 답해."
-    if lang == "vi":
-        return f"Xin chào! Mình là Bepu AI. Mình hiểu: \"{msg}\". Hiện đang ở chế độ đơn giản."
-    return f"Hi! I'm Bepu AI. I understood: \"{msg}\". Running in simple mode."
-
-
-@app.get("/", response_class=PlainTextResponse)
-def root():
-    return "Bepu AI Server is running. See /docs for OpenAPI."
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "version": APP_VERSION}
-
-@app.get("/version")
-def version():
-    return {"version": APP_VERSION}
+def build_messages(persona: str, style: str, user: str):
+    system = SYSTEM_TEMPLATE.format(persona=persona, style=style)
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
 
 @app.post("/chat", response_model=ChatOut)
 def chat(inp: ChatIn):
     t0 = time.time()
-    lang = inp.target_lang or detect_lang(inp.message)
+    # 안전장치: 비어있는 입력 막기
+    user_msg = (inp.message or "").strip()
+    if not user_msg:
+        return ChatOut(reply="무슨 얘기부터 시작해볼까? 오늘 기분은 어때?", audio_url="")
 
-    if _openai_client is not None:
+    # OpenAI가 설정되어 있으면 우선 시도
+    if client is not None:
         try:
-            msgs = [
-                {"role": "system", "content": "You are Bepu (BestFriend), a kind and concise assistant."},
-                {"role": "user", "content": f"User language: {lang}{translate_hint(lang)}\\nUser: {inp.message}\\nAssistant:"},
-            ]
-            resp = _openai_client.chat.completions.create(
-                model=OPENAI_MODEL,
-                messages=msgs,
-                temperature=BF_TEMPERATURE,
+            messages = build_messages(inp.persona or "", inp.style or "", user_msg)
+            # 모델은 gpt-4o-mini / gpt-4.1-mini / gpt-3.5-turbo 등 사용 가능
+            completion = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=inp.temperature or 0.2,
+                max_tokens=128,
             )
-            reply = resp.choices[0].message.content.strip()
-            return ChatOut(
-                reply=reply,
-                detected_lang=lang,
-                model=OPENAI_MODEL,
-                mode="openai",
-                latency_ms=int((time.time()-t0)*1000),
-            )
-        except Exception:
-            pass
+            content = completion.choices[0].message.content.strip()
+            # 후처리: 문장 길이 제한(너무 길면 자르기, 간단한 안전 장치)
+            if inp.max_sentences and inp.max_sentences > 0:
+                # 매우 러프하게 문장 수 제한
+                parts = [p.strip() for p in content.split("\n") if p.strip()]
+                content = " ".join(parts)
+            # 말끝에 되물음 없으면 짧게 추가
+            if not content.endswith("?") and not content.endswith("다?") and not content.endswith("요?"):
+                content = f"{content} 너 생각은 어때?"
+            return ChatOut(reply=content, audio_url="")
 
-    reply = fallback_reply(inp.message, lang)
-    return ChatOut(
-        reply=reply,
-        detected_lang=lang,
-        model="fallback",
-        mode="fallback",
-        latency_ms=int((time.time()-t0)*1000),
-    )
+        except Exception as e:
+            # 모델 호출 실패 → 폴백 (자연스러운 기본 멘트, 고정 문구 금지)
+            print("[ERROR] OpenAI call failed:", e)
 
-@app.post("/tts")
-def tts(inp: TTSIn):
-    text = (inp.text or "").strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="text is required")
+    # 최종 폴백 (고정된 어색한 문구 대신 자연어 한두 문장)
+    base = "좋아, 라디오처럼 가볍게 얘기해 보자. 방금 한 말에서 이어서 더 말해줄래?"
+    if inp.lang == "ko":
+        reply = base
+    else:
+        reply = "Let's keep it light like radio chat. Want to say a bit more about that?"
+    # 말끝에 되물음
+    if not reply.endswith("?"):
+        reply += " 너 생각은 어때?"
 
-    lang = (inp.lang or "").strip().lower()
-    if lang not in {"ko", "en", "vi"}:
-        lang = detect_lang(text)
-        if lang not in {"ko", "en", "vi"}:
-            lang = "en"
+    return ChatOut(reply=reply, audio_url="")
 
-    buf = io.BytesIO()
-    try:
-        gTTS(text=text, lang=lang).write_to_fp(buf)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"TTS failed: {e}")
-    buf.seek(0)
-    return StreamingResponse(buf, media_type="audio/mpeg", headers={"Content-Disposition": 'inline; filename="voice.mp3"'})
+# 헬스체크
+@app.get("/")
+def root():
+    return {"ok": True, "service": "A1-BF-Server"}
+
+if __name__ == "__main__":
+    # 로컬 테스트용
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
